@@ -52,7 +52,7 @@ KubeVision is composed of several key components:
 **Clone the Repository:**
 
 ```bash
-git clone https://github.com/yourusername/kubevision.git
+git clone https://github.com/Shivang-X/KubeVision.git
 cd kubevision
 ```
 
