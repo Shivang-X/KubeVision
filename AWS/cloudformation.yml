@@ -1,0 +1,544 @@
+Parameters:
+  BucketName:
+    Type: String
+    Default: kubevision
+  SnsTopicName:
+    Type: String
+    Default: KubeVisionSNS
+  AwsAccessKey:
+    Type: String
+    Default: YOUR_AWS_ACCESS_KEY
+  AwsSecretAccessKey:
+    Type: String
+    Default: YOUR_AWS_SECRET_ACCESS_KEY
+  AwsSessionToken:
+    Type: String
+    Default: YOUR_AWS_SESSION_TOKEN
+  
+Resources:
+
+  # Secrets Manager
+  MySecret:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: KubeVisionSecret
+      Description: "Secrets for KubeVision security"
+      SecretString: '"s3_bucket":"kubevision"'
+
+  #S3 bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: kubevision
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  #SNS Topic created
+  MySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Term Assignment Email Service
+      TopicName: !Ref SnsTopicName
+
+  MySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: shivang2727@gmail.com
+      Protocol: email
+      TopicArn: !Ref MySNSTopic
+  
+  #Lambda Functions
+  MyLambdaFunction1:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: 'notify'
+      Handler: 'index.handler'
+      Runtime: 'nodejs18.x'
+      Timeout: 10
+      Role: <Role ARN>
+      Code: 
+        ZipFile: |
+          const { SNSClient, PublishCommand } = require('@aws-sdk/client-sns');
+
+          exports.handler = async (event) => {
+
+            const { email, body } = event.body;
+
+            if (!email || !body) {
+              return {
+                statusCode: 400,
+                body: 'Missing required fields: email and body',
+              };
+            }
+
+            const snsClient = new SNSClient({ region: 'us-east-1' }); 
+
+            const message = {
+              Subject: 'Email Notification',
+              Message: body,
+              TopicArn: `arn:aws:sns:us-east-1:154514599060:KubeVisionSNS`, 
+            };
+
+            try {
+              await snsClient.send(new PublishCommand(message));
+              return {
+                statusCode: 200,
+                body: 'Email sent successfully!',
+              };
+            } catch (err) {
+              console.error(err);
+              return {
+                statusCode: 500,
+                body: 'Error sending email: ' + err.message,
+              };
+            }
+          };
+
+  MyLambdaFunction2:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: 'storeData'
+      Handler: 'index.lambda_handler'
+      Runtime: 'python3.12'
+      Timeout: 10
+      Role: <Role ARN>
+      Code: 
+        ZipFile: |
+          import json
+          import boto3
+          import csv
+          from io import StringIO
+          from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
+          import boto3
+          from botocore.exceptions import ClientError
+
+          s3 = boto3.client('s3')
+
+          def lambda_handler(event, context):
+              # bucket_name = 'kubevision'
+              file_key = 'reqHistory.csv'
+              
+              body = event.get('body');
+              # # Validate input
+
+              # return {
+              #     'body' : json.loads(body).get('time')
+              # }
+              time = json.loads(body).get('time')
+              count = json.loads(body).get('count')
+              # time = "fdsf"
+              # count = "sdf"
+              
+              #Secret Manager
+              secret_name = "KubeVisionSecret"
+              region_name = "us-east-1"
+
+              # Create a Secrets Manager client
+              session = boto3.session.Session()
+              client = session.client(
+                  service_name='secretsmanager',
+                  region_name=region_name
+              )
+
+              try:
+                  get_secret_value_response = client.get_secret_value(
+                      SecretId=secret_name
+                  )
+                  print(get_secret_value_response)
+              except ClientError as e:
+                  raise e
+
+              secret = get_secret_value_response['SecretString']
+              print(json.loads(secret)['s3_bucket'])
+              bucket_name=json.loads(secret)['s3_bucket']
+              
+              
+              if time is None or count is None:
+                  return {
+                      'statusCode': 400,
+                      'body': json.loads(body).get('time')
+                  }
+              
+              # Retrieve the CSV file from S3
+              try:
+                  response = s3.get_object(Bucket=bucket_name, Key=file_key)
+                  csv_content = response['Body'].read().decode('utf-8')
+                  csv_reader = csv.reader(StringIO(csv_content))
+                  csv_data = list(csv_reader)
+              except s3.exceptions.NoSuchKey:
+                  # Create a new CSV file if it doesn't exist
+                  csv_data = [['Time', 'Count']]  # Example headers
+              except (NoCredentialsError, PartialCredentialsError):
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('Error with AWS credentials.')
+                  }
+              except ClientError as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error accessing S3: {str(e)}')
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'An unexpected error occurred: {str(e)}')
+                  }
+              
+              # Add a new row to the CSV data
+              new_row = [time, count]
+              csv_data.append(new_row)
+              
+              # Write the updated CSV data back to S3
+              try:
+                  output = StringIO()
+                  csv_writer = csv.writer(output)
+                  csv_writer.writerows(csv_data)
+                  s3.put_object(Bucket=bucket_name, Key=file_key, Body=output.getvalue().encode('utf-8'))
+              except (NoCredentialsError, PartialCredentialsError):
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('Error with AWS credentials.')
+                  }
+              except ClientError as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error writing to S3: {str(e)}')
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'An unexpected error occurred: {str(e)}')
+                  }
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('CSV file updated successfully!')
+              }
+
+  #API Gateway
+  MyApi:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: 'MyApi'
+      Description: 'API Gateway for Lambda Functions'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  Textractresponse4xx:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref MyApi
+      ResponseType: DEFAULT_4XX
+      StatusCode: '404'
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+
+  Textractresponse5xx:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref MyApi
+      ResponseType: DEFAULT_5XX
+      StatusCode: '500'
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+
+  MyApiResource1:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId:
+        Fn::GetAtt: [ 'MyApi', 'RootResourceId' ]
+      PathPart: 'function1'
+      RestApiId:
+        Ref: 'MyApi'
+
+  MyApiMethod1:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId:
+        Ref: 'MyApiResource1'
+      RestApiId:
+        Ref: 'MyApi'
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: "AWS"
+        
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST, OPTIONS'"
+          - StatusCode: 404
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+          - StatusCode: 500
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        Uri:
+          Fn::Sub: 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction1.Arn}/invocations'
+        RequestTemplates:
+          application/json:
+            "{
+              \"body\": $input.json('$')
+            }"
+        PassthroughBehavior: "WHEN_NO_TEMPLATES"
+        RequestParameters:
+          "integration.request.header.Content-Type": "'application/json'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 400
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 500
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 401
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 402
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  MyApiResource2:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId:
+        Fn::GetAtt: [ 'MyApi', 'RootResourceId' ]
+      PathPart: 'function2'
+      RestApiId:
+        Ref: 'MyApi'
+
+  MyApiMethod2:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId:
+        Ref: 'MyApiResource2'
+      RestApiId:
+        Ref: 'MyApi'
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri:
+          Fn::Sub: 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction2.Arn}/invocations'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST, OPTIONS'"
+          - StatusCode: 404
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+          - StatusCode: 500
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json:
+            "{
+              \"body\": $input.json('$')
+            }"
+        PassthroughBehavior: "WHEN_NO_TEMPLATES"
+        RequestParameters:
+          "integration.request.header.Content-Type": "'application/json'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 400
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 500
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 401
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 402
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  MyApiOptions1:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      ResourceId:
+        Ref: 'MyApiResource1'
+      RestApiId:
+        Ref: 'MyApi'
+      Integration:
+        Type: "AWS"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST, OPTIONS'"
+          - StatusCode: 400
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+          - StatusCode: 500
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+          - StatusCode: 401
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+          - StatusCode: 402
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction1.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 400
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+        - StatusCode: 500
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+        - StatusCode: 401
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 402
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  MyApiOptions2:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      ResourceId:
+        Ref: 'MyApiResource2'
+      RestApiId:
+        Ref: 'MyApi'
+      Integration:
+        Type: "AWS"
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST, OPTIONS'"
+          - StatusCode: 400
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+          - StatusCode: 500
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+          - StatusCode: 401
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+          - StatusCode: 402
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction2.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 400
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+        - StatusCode: 500
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+        - StatusCode: 401
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 402
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  MyApiDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn: 
+      - MyApiMethod1
+      - MyApiMethod2
+      - MyApiOptions1
+      - MyApiOptions2
+    Properties:
+      RestApiId:
+        Ref: 'MyApi'
+      StageName: 'prod'
+
+  LambdaApiInvokePermission1:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName:
+        Ref: 'MyLambdaFunction1'
+      Principal: 'apigateway.amazonaws.com'
+
+  LambdaApiInvokePermission2:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName:
+        Ref: 'MyLambdaFunction2'
+      Principal: 'apigateway.amazonaws.com'
+
+
+Outputs:
+  ApiUrl:
+    Description: 'The base URL of the API Gateway'
+    Value: 
+      Fn::Sub: 'https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  Function1Url:
+    Description: 'The URL to invoke Lambda Function 1'
+    Value: 
+      Fn::Sub: 'https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/prod/function1'
+  Function2Url:
+    Description: 'The URL to invoke Lambda Function 2'
+    Value: 
+      Fn::Sub: 'https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/prod/function2'
